@@ -59,6 +59,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import kotlin.math.PI
+import kotlin.math.abs
 import kotlin.math.atan2
 import kotlin.math.cos
 import kotlin.math.sin
@@ -87,7 +88,8 @@ sealed class DrawElement {
         val end: Offset,
         override val strokeWidth: Float,
         override val isEraser: Boolean,
-        override val color: Color
+        override val color: Color,
+        val rotation: Float = 0f
     ) : DrawElement()
 }
 
@@ -114,7 +116,7 @@ fun makePaint(strokeWidth: Float, isEraser: Boolean, fill: Boolean, color: Color
     if (isEraser) blendMode = BlendMode.Clear else this.color = color
 }
 
-fun renderShape(canvas: Canvas, shape: DrawShape, start: Offset, end: Offset, paint: Paint) {
+fun renderShape(canvas: Canvas, shape: DrawShape, start: Offset, end: Offset, paint: Paint, rotation: Float = 0f) {
     val left   = minOf(start.x, end.x)
     val top    = minOf(start.y, end.y)
     val right  = maxOf(start.x, end.x)
@@ -122,12 +124,31 @@ fun renderShape(canvas: Canvas, shape: DrawShape, start: Offset, end: Offset, pa
     if (right - left < 2f && bottom - top < 2f) return
     val cx = (left + right) / 2f
     val cy = (top + bottom) / 2f
+    // Project the world-space drag delta onto screen axes to recover the true
+    // screen-space bounding box, then counter-rotate so every shape appears level
+    // with the view angle at which it was placed.
+    val dx = end.x - start.x
+    val dy = end.y - start.y
+    val rad = rotation * (PI / 180.0).toFloat()
+    val cosR = cos(rad); val sinR = sin(rad)
+    val halfW = abs(dx * cosR - dy * sinR) / 2f
+    val halfH = abs(dx * sinR + dy * cosR) / 2f
     when (shape) {
-        DrawShape.CIRCLE -> canvas.drawCircle(Offset(cx, cy), minOf(right - left, bottom - top) / 2f, paint)
-        DrawShape.SQUARE -> canvas.drawRect(Rect(left, top, right, bottom), paint)
-        DrawShape.STAR   -> {
-            val outerR = minOf(right - left, bottom - top) / 2f
-            canvas.drawPath(starPath(Offset(cx, cy), outerR, outerR * 0.382f), paint)
+        DrawShape.CIRCLE -> canvas.drawCircle(Offset(cx, cy), minOf(halfW, halfH), paint)
+        DrawShape.SQUARE -> {
+            canvas.save()
+            canvas.translate(cx, cy)
+            canvas.rotate(-rotation)
+            canvas.drawRect(Rect(-halfW, -halfH, halfW, halfH), paint)
+            canvas.restore()
+        }
+        DrawShape.STAR -> {
+            val outerR = minOf(halfW, halfH)
+            canvas.save()
+            canvas.translate(cx, cy)
+            canvas.rotate(-rotation)
+            canvas.drawPath(starPath(Offset.Zero, outerR, outerR * 0.382f), paint)
+            canvas.restore()
         }
     }
 }
@@ -191,10 +212,11 @@ fun StencilEditor() {
                         val firstDown = awaitFirstDown(requireUnconsumed = false)
 
                         var drawing = false
-                        var capturedWidth  = 0f
-                        var capturedEraser = false
+                        var capturedWidth    = 0f
+                        var capturedEraser   = false
                         var capturedShape: DrawShape? = null
-                        var capturedColor  = Color.Black
+                        var capturedColor    = Color.Black
+                        var capturedRotation = 0f
 
                         var prevPointerCount = 1
                         var prevCentroid = firstDown.position
@@ -213,10 +235,11 @@ fun StencilEditor() {
                                     val worldPos = screenToWorld(pressed[0].position)
                                     if (!drawing) {
                                         drawing = true
-                                        capturedWidth  = currentStrokeWidth
-                                        capturedEraser = currentIsEraser
-                                        capturedShape  = currentShape
-                                        capturedColor  = currentColor
+                                        capturedWidth    = currentStrokeWidth
+                                        capturedEraser   = currentIsEraser
+                                        capturedShape    = currentShape
+                                        capturedColor    = currentColor
+                                        capturedRotation = viewRotation
                                         if (capturedShape == null) livePoints = listOf(worldPos)
                                         else { liveShapeStart = worldPos; liveShapeEnd = worldPos }
                                     } else {
@@ -279,7 +302,7 @@ fun StencilEditor() {
                                 else -> {
                                     val s = liveShapeStart; val e = liveShapeEnd
                                     if (s != null && e != null && (e - s).getDistance() >= 5f) {
-                                        elements  = elements + DrawElement.Shape(capturedShape, s, e, capturedWidth, capturedEraser, capturedColor)
+                                        elements  = elements + DrawElement.Shape(capturedShape, s, e, capturedWidth, capturedEraser, capturedColor, capturedRotation)
                                         redoStack = emptyList()
                                     }
                                     liveShapeStart = null; liveShapeEnd = null
@@ -311,7 +334,7 @@ fun StencilEditor() {
                         }
                         is DrawElement.Shape -> {
                             val paint = makePaint(el.strokeWidth, el.isEraser, el.isEraser, el.color)
-                            renderShape(canvas, el.shape, el.start, el.end, paint)
+                            renderShape(canvas, el.shape, el.start, el.end, paint, el.rotation)
                         }
                     }
                 }
@@ -328,7 +351,7 @@ fun StencilEditor() {
                 val ls = liveShapeStart; val le = liveShapeEnd; val ps = currentShape
                 if (ls != null && le != null && ps != null) {
                     val paint = makePaint(currentStrokeWidth, currentIsEraser, currentIsEraser, currentColor)
-                    renderShape(canvas, ps, ls, le, paint)
+                    renderShape(canvas, ps, ls, le, paint, viewRotation)
                 }
 
                 canvas.restore()
