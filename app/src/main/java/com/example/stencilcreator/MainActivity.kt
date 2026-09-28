@@ -13,6 +13,7 @@ import android.os.Environment
 import android.provider.MediaStore
 import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
@@ -35,6 +36,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.aspectRatio
@@ -43,6 +45,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Slider
@@ -83,16 +86,24 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlin.math.PI
 import kotlin.math.abs
 import kotlin.math.atan2
 import kotlin.math.cos
+import kotlin.math.roundToInt
 import kotlin.math.sin
 import kotlin.math.sqrt
 
 // ── Domain types ──────────────────────────────────────────────────────────────
 
 enum class Tool { PEN, ERASER, SELECT, LASSO }
+
+// Screen pixels per world unit (page pixel); wide range so very large and very small pages both fit
+const val MIN_VIEW_SCALE = 0.02f
+const val MAX_VIEW_SCALE = 10f
 enum class DrawShape { CIRCLE, SQUARE, STAR }
 
 sealed class DrawElement {
@@ -215,63 +226,54 @@ fun renderImage(canvas: Canvas, el: DrawElement.Image) {
     canvas.restore()
 }
 
+fun drawElement(canvas: Canvas, el: DrawElement) {
+    when (el) {
+        is DrawElement.FreeStroke -> {
+            if (el.points.size >= 2) {
+                val paint = makePaint(el.strokeWidth, el.isEraser, false, el.color)
+                val path = Path().apply {
+                    moveTo(el.points[0].x, el.points[0].y)
+                    el.points.drop(1).forEach { lineTo(it.x, it.y) }
+                }
+                canvas.drawPath(path, paint)
+            }
+        }
+        is DrawElement.Shape -> {
+            val paint = makePaint(el.strokeWidth, el.isEraser, el.isEraser, el.color)
+            renderShape(canvas, el.shape, el.start, el.end, paint, el.rotation)
+        }
+        is DrawElement.Image -> renderImage(canvas, el)
+    }
+}
+
 // ── Export ────────────────────────────────────────────────────────────────────
 
-// Renders the layers exactly as the on-screen canvas does (background + world
-// transform per layer) but skips live in-progress strokes/shapes and selection
-// overlays, since those are editing UI, not part of the drawing itself.
-fun renderLayersToBitmap(
-    layers: List<Layer>,
-    size: Size,
-    viewOffset: Offset,
-    viewRotation: Float,
-    viewScale: Float
-): AndroidBitmap {
-    val width  = size.width.toInt().coerceAtLeast(1)
-    val height = size.height.toInt().coerceAtLeast(1)
+// Renders the page (world rect 0,0 → page px) at the given scale. Anything drawn
+// off the page is cropped, and editing overlays (live strokes, selection) are skipped.
+fun renderDesignToBitmap(layers: List<Layer>, page: PageSize, scale: Float = 1f): AndroidBitmap {
+    val width  = (page.widthPx  * scale).roundToInt().coerceAtLeast(1)
+    val height = (page.heightPx * scale).roundToInt().coerceAtLeast(1)
     val bitmap = AndroidBitmap.createBitmap(width, height, AndroidBitmap.Config.ARGB_8888)
     val canvas = Canvas(bitmap.asImageBitmap())
     val bounds = Rect(Offset.Zero, Size(width.toFloat(), height.toFloat()))
 
-    val bgLayer = layers.first { it.isBackground }
-    val bgColor = bgLayer.backgroundColor
+    val bgColor = layers.firstOrNull { it.isBackground }?.backgroundColor
     if (bgColor != null) {
         canvas.drawRect(bounds, Paint().apply { color = bgColor })
     }
 
     for (layer in layers) {
-        val layerPaint = Paint().apply { alpha = layer.opacity }
-        canvas.saveLayer(bounds, layerPaint)
-        canvas.translate(viewOffset.x, viewOffset.y)
-        canvas.rotate(viewRotation)
-        canvas.scale(viewScale, viewScale)
-
-        for (el in layer.elements) {
-            when (el) {
-                is DrawElement.FreeStroke -> {
-                    if (el.points.size >= 2) {
-                        val paint = makePaint(el.strokeWidth, el.isEraser, false, el.color)
-                        val path = Path().apply {
-                            moveTo(el.points[0].x, el.points[0].y)
-                            el.points.drop(1).forEach { lineTo(it.x, it.y) }
-                        }
-                        canvas.drawPath(path, paint)
-                    }
-                }
-                is DrawElement.Shape -> {
-                    val paint = makePaint(el.strokeWidth, el.isEraser, el.isEraser, el.color)
-                    renderShape(canvas, el.shape, el.start, el.end, paint, el.rotation)
-                }
-                is DrawElement.Image -> renderImage(canvas, el)
-            }
-        }
+        canvas.saveLayer(bounds, Paint().apply { alpha = layer.opacity })
+        canvas.scale(scale, scale)
+        layer.elements.forEach { drawElement(canvas, it) }
         canvas.restore()
     }
     return bitmap
 }
 
-fun saveBitmapToGallery(context: android.content.Context, bitmap: AndroidBitmap): Uri? {
-    val filename = "Stencil_${System.currentTimeMillis()}.png"
+fun saveBitmapToGallery(context: android.content.Context, bitmap: AndroidBitmap, name: String): Uri? {
+    val safeName = name.replace(Regex("[^A-Za-z0-9 _-]"), "_").trim().take(60).ifBlank { "Stencil" }
+    val filename = "${safeName}_${System.currentTimeMillis()}.png"
     val resolver = context.contentResolver
     val values = ContentValues().apply {
         put(MediaStore.Images.Media.DISPLAY_NAME, filename)
@@ -291,6 +293,50 @@ fun saveBitmapToGallery(context: android.content.Context, bitmap: AndroidBitmap)
         resolver.update(uri, values, null, null)
     }
     return uri
+}
+
+// Saves an image to the device gallery: (design name, render) -> Unit. render runs
+// off the main thread and may return null if the design can't be produced.
+typealias GalleryExporter = (name: String, render: () -> AndroidBitmap?) -> Unit
+
+@Composable
+fun rememberGalleryExporter(): GalleryExporter {
+    val context = LocalContext.current
+    val scope   = rememberCoroutineScope()
+    var pending by remember { mutableStateOf<Pair<String, () -> AndroidBitmap?>?>(null) }
+
+    fun export(name: String, render: () -> AndroidBitmap?) {
+        scope.launch {
+            val uri = withContext(Dispatchers.IO) {
+                runCatching { render()?.let { saveBitmapToGallery(context, it, name) } }.getOrNull()
+            }
+            Toast.makeText(
+                context,
+                if (uri != null) "Saved \"$name\" to gallery" else "Failed to save image",
+                Toast.LENGTH_SHORT
+            ).show()
+        }
+    }
+
+    val permissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        val request = pending
+        pending = null
+        if (granted && request != null) export(request.first, request.second)
+        else if (!granted) Toast.makeText(context, "Storage permission needed to save", Toast.LENGTH_SHORT).show()
+    }
+
+    return { name, render ->
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q ||
+            ContextCompat.checkSelfPermission(context, Manifest.permission.WRITE_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED
+        ) {
+            export(name, render)
+        } else {
+            pending = name to render
+            permissionLauncher.launch(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+        }
+    }
 }
 
 // ── Selection helpers ─────────────────────────────────────────────────────────
@@ -380,21 +426,32 @@ fun selectionBounds(elements: List<DrawElement>, indices: Set<Int>): Rect? {
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        setContent { StencilEditor() }
+        setContent { StencilApp() }
     }
 }
 
 // ── Main composable ───────────────────────────────────────────────────────────
 
 @Composable
-fun StencilEditor() {
+fun StencilEditor(
+    document: EditorDocument,
+    libraryState: LibraryState,
+    storage: DesignStorage,
+    exportToGallery: GalleryExporter,
+    onExit: () -> Unit
+) {
     val context = LocalContext.current
+    val density = LocalDensity.current
+    val scope   = rememberCoroutineScope()
 
-    var layers by remember { mutableStateOf(listOf(
-        Layer(id = 0, name = "Background", isBackground = true, backgroundColor = Color.White)
-    )) }
+    // Page occupies world rect (0,0)-(pageW,pageH); one world unit == one exported pixel
+    val page  = document.page
+    val pageW = page.widthPx.toFloat()
+    val pageH = page.heightPx.toFloat()
+
+    var layers by remember { mutableStateOf(document.layers) }
     var activeLayerIndex by remember { mutableStateOf(0) }
-    var nextLayerId      by remember { mutableStateOf(1) }
+    var nextLayerId      by remember { mutableStateOf(document.nextLayerId) }
     var undoStack by remember { mutableStateOf(listOf<List<Layer>>()) }
     var redoStack by remember { mutableStateOf(listOf<List<Layer>>()) }
 
@@ -418,10 +475,24 @@ fun StencilEditor() {
 
     var pendingBitmap by remember { mutableStateOf<AndroidBitmap?>(null) }
 
+    var designId   by remember { mutableStateOf(document.designId) }
+    var designName by remember { mutableStateOf(document.name) }
+    var projectId  by remember { mutableStateOf(document.projectId) }
+    // Every edit replaces the layers list, so identity tells us if there are unsaved changes
+    var savedLayers by remember { mutableStateOf(document.layers) }
+    val isDirty = layers !== savedLayers
+
+    var showSaveDialog    by remember { mutableStateOf(false) }
+    var showGalleryPrompt by remember { mutableStateOf(false) }
+    var showExitPrompt    by remember { mutableStateOf(false) }
+    var exitAfterSave     by remember { mutableStateOf(false) }
+    var isSaving          by remember { mutableStateOf(false) }
+
     var viewScale    by remember { mutableStateOf(1f) }
     var viewRotation by remember { mutableStateOf(0f) }
     var viewOffset   by remember { mutableStateOf(Offset.Zero) }
     var canvasSize   by remember { mutableStateOf(Size(800f, 1200f)) }
+    var hasFittedView by remember { mutableStateOf(false) }
 
     val currentStrokeWidth by rememberUpdatedState(if (selectedTool == Tool.PEN) penSize else eraserSize)
     val currentIsEraser    by rememberUpdatedState(selectedTool == Tool.ERASER)
@@ -430,6 +501,19 @@ fun StencilEditor() {
     val currentTool        by rememberUpdatedState(selectedTool)
     val currentLayers      by rememberUpdatedState(layers)
     val currentActiveIdx   by rememberUpdatedState(activeLayerIndex)
+
+    // Centre the whole page in the area not covered by the top buttons and bottom toolbar
+    fun fitPageToView() {
+        val topPad    = with(density) { 110.dp.toPx() }
+        val bottomPad = with(density) { 190.dp.toPx() }
+        val sidePad   = with(density) { 24.dp.toPx() }
+        val availW = (canvasSize.width  - 2 * sidePad).coerceAtLeast(1f)
+        val availH = (canvasSize.height - topPad - bottomPad).coerceAtLeast(1f)
+        val s = minOf(availW / pageW, availH / pageH).coerceIn(MIN_VIEW_SCALE, MAX_VIEW_SCALE)
+        viewScale    = s
+        viewRotation = 0f
+        viewOffset   = Offset((canvasSize.width - pageW * s) / 2f, topPad + (availH - pageH * s) / 2f)
+    }
 
     fun screenToWorld(screen: Offset): Offset {
         val d = screen - viewOffset
@@ -476,32 +560,39 @@ fun StencilEditor() {
         }
     }
 
-    // Save-to-gallery
-    fun exportToGallery() {
-        val bitmap = renderLayersToBitmap(layers, canvasSize, viewOffset, viewRotation, viewScale)
-        val uri = saveBitmapToGallery(context, bitmap)
-        Toast.makeText(
-            context,
-            if (uri != null) "Saved to gallery" else "Failed to save image",
-            Toast.LENGTH_SHORT
-        ).show()
+    fun requestExit() {
+        if (isDirty) showExitPrompt = true else onExit()
     }
+    BackHandler { requestExit() }
 
-    val storagePermissionLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.RequestPermission()
-    ) { granted ->
-        if (granted) exportToGallery()
-        else Toast.makeText(context, "Storage permission needed to save", Toast.LENGTH_SHORT).show()
-    }
-
-    fun requestSaveToGallery() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q ||
-            ContextCompat.checkSelfPermission(context, Manifest.permission.WRITE_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED
-        ) {
-            exportToGallery()
-        } else {
-            storagePermissionLauncher.launch(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+    fun saveDesign(name: String, targetProjectId: String) {
+        val snapshot = layers
+        val layerId  = nextLayerId
+        val id       = designId ?: newId()
+        val meta     = DesignMeta(id, name, targetProjectId, page, document.createdAt, System.currentTimeMillis())
+        isSaving = true
+        scope.launch {
+            val ok = withContext(Dispatchers.IO) {
+                runCatching { storage.writeDesign(id, snapshot, layerId, page) }.isSuccess
+            }
+            isSaving = false
+            if (ok) {
+                libraryState.upsertDesign(meta)
+                designId    = id
+                designName  = name
+                projectId   = targetProjectId
+                savedLayers = snapshot
+                showGalleryPrompt = true
+            } else {
+                exitAfterSave = false
+                Toast.makeText(context, "Failed to save design", Toast.LENGTH_SHORT).show()
+            }
         }
+    }
+
+    fun exportCurrentToGallery() {
+        val snapshot = layers
+        exportToGallery(designName) { renderDesignToBitmap(snapshot, page) }
     }
 
     val displayAngle = ((viewRotation % 360f) + 360f) % 360f
@@ -513,7 +604,13 @@ fun StencilEditor() {
         Canvas(
             modifier = Modifier
                 .fillMaxSize()
-                .onSizeChanged { canvasSize = Size(it.width.toFloat(), it.height.toFloat()) }
+                .onSizeChanged {
+                    canvasSize = Size(it.width.toFloat(), it.height.toFloat())
+                    if (!hasFittedView) {
+                        fitPageToView()
+                        hasFittedView = true
+                    }
+                }
                 .pointerInput(Unit) {
                     awaitEachGesture {
                         val firstDown = awaitFirstDown(requireUnconsumed = false)
@@ -646,7 +743,7 @@ fun StencilEditor() {
                                             }
                                         } else {
                                             val worldPt  = screenToWorld(centroid)
-                                            val newScale = (viewScale * zoom).coerceIn(0.2f, 5f)
+                                            val newScale = (viewScale * zoom).coerceIn(MIN_VIEW_SCALE, MAX_VIEW_SCALE)
                                             val newRot   = viewRotation + dRot
                                             val rad = newRot * (PI / 180.0).toFloat()
                                             val c = cos(rad); val s = sin(rad)
@@ -728,55 +825,54 @@ fun StencilEditor() {
                     }
                 }
         ) {
-            // ── Canvas background ─────────────────────────────────────────────
-            val bgLayer = layers.first { it.isBackground }
-            val bgColor = bgLayer.backgroundColor
-            if (bgColor != null) {
-                drawRect(bgColor)
-            } else {
-                val cell = 20.dp.toPx()
-                val cols = (size.width / cell).toInt() + 1
-                val rows = (size.height / cell).toInt() + 1
-                for (row in 0..rows) {
-                    for (col in 0..cols) {
-                        drawRect(
-                            color    = if ((row + col) % 2 == 0) Color(0xFFE0E0E0) else Color(0xFFF5F5F5),
-                            topLeft  = Offset(col * cell, row * cell),
-                            size     = Size(cell, cell)
-                        )
-                    }
-                }
-            }
+            // ── Desk + page background ────────────────────────────────────────
+            drawRect(Color(0xFF9E9E9E))
+            val pageRect = Rect(0f, 0f, pageW, pageH)
+            val bgColor  = layers.first { it.isBackground }.backgroundColor
 
             drawIntoCanvas { canvas ->
-                // ── Render each layer ─────────────────────────────────────────
+                fun applyWorldTransform() {
+                    canvas.translate(viewOffset.x, viewOffset.y)
+                    canvas.rotate(viewRotation)
+                    canvas.scale(viewScale, viewScale)
+                }
+
+                canvas.save()
+                applyWorldTransform()
+                if (bgColor != null) {
+                    canvas.drawRect(pageRect, Paint().apply { color = bgColor })
+                } else {
+                    // Transparent page: screen-space checkerboard clipped to the page,
+                    // so the cell count stays bounded at any zoom level
+                    canvas.clipRect(pageRect)
+                    canvas.scale(1f / viewScale, 1f / viewScale)
+                    canvas.rotate(-viewRotation)
+                    canvas.translate(-viewOffset.x, -viewOffset.y)
+                    val cell  = 20.dp.toPx()
+                    val light = Paint().apply { color = Color(0xFFF5F5F5) }
+                    val dark  = Paint().apply { color = Color(0xFFE0E0E0) }
+                    val cols = (size.width / cell).toInt() + 1
+                    val rows = (size.height / cell).toInt() + 1
+                    for (row in 0..rows) {
+                        for (col in 0..cols) {
+                            canvas.drawRect(
+                                Rect(Offset(col * cell, row * cell), Size(cell, cell)),
+                                if ((row + col) % 2 == 0) dark else light
+                            )
+                        }
+                    }
+                }
+                canvas.restore()
+
+                // ── Render each layer, clipped to the page ────────────────────
                 for ((layerIdx, layer) in layers.withIndex()) {
                     val isActiveLayer = layerIdx == activeLayerIndex
                     val layerPaint = Paint().apply { alpha = layer.opacity }
                     canvas.saveLayer(Rect(Offset.Zero, size), layerPaint)
-                    canvas.translate(viewOffset.x, viewOffset.y)
-                    canvas.rotate(viewRotation)
-                    canvas.scale(viewScale, viewScale)
+                    applyWorldTransform()
+                    canvas.clipRect(pageRect)
 
-                    for (el in layer.elements) {
-                        when (el) {
-                            is DrawElement.FreeStroke -> {
-                                if (el.points.size >= 2) {
-                                    val paint = makePaint(el.strokeWidth, el.isEraser, false, el.color)
-                                    val path = Path().apply {
-                                        moveTo(el.points[0].x, el.points[0].y)
-                                        el.points.drop(1).forEach { lineTo(it.x, it.y) }
-                                    }
-                                    canvas.drawPath(path, paint)
-                                }
-                            }
-                            is DrawElement.Shape -> {
-                                val paint = makePaint(el.strokeWidth, el.isEraser, el.isEraser, el.color)
-                                renderShape(canvas, el.shape, el.start, el.end, paint, el.rotation)
-                            }
-                            is DrawElement.Image -> renderImage(canvas, el)
-                        }
-                    }
+                    layer.elements.forEach { drawElement(canvas, it) }
 
                     if (isActiveLayer) {
                         if (livePoints.size >= 2) {
@@ -809,9 +905,13 @@ fun StencilEditor() {
                     android.graphics.DashPathEffect(floatArrayOf(dashStep, dashGap), 0f)
 
                 canvas.saveLayer(Rect(Offset.Zero, size), Paint())
-                canvas.translate(viewOffset.x, viewOffset.y)
-                canvas.rotate(viewRotation)
-                canvas.scale(viewScale, viewScale)
+                applyWorldTransform()
+
+                canvas.drawRect(pageRect, Paint().apply {
+                    style       = PaintingStyle.Stroke
+                    strokeWidth = 1f / viewScale
+                    color       = Color(0x66000000)
+                })
 
                 val lss = liveSelectionStart; val lse = liveSelectionEnd
                 if (lss != null && lse != null) {
@@ -839,13 +939,30 @@ fun StencilEditor() {
             }
         }
 
-        // ── Selection actions ─────────────────────────────────────────────────
+        // ── Navigation, title & selection actions ─────────────────────────────
 
-        if (selectedIndices.isNotEmpty()) {
-            Row(
-                modifier = Modifier.align(Alignment.TopStart).padding(16.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
+        Row(
+            modifier = Modifier.align(Alignment.TopStart).statusBarsPadding().padding(16.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Button(onClick = { requestExit() }) { Text("‹ Projects") }
+            Surface(
+                shape = RoundedCornerShape(8.dp),
+                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.9f)
             ) {
+                Text(
+                    text = when {
+                        isSaving -> "Saving…"
+                        isDirty  -> "$designName •  ${page.label}"
+                        else     -> "$designName  ${page.label}"
+                    },
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                    fontSize = 14.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            if (selectedIndices.isNotEmpty()) {
                 Button(onClick = { selectedIndices = emptySet() }) { Text("Deselect") }
                 Button(onClick = {
                     undoStack = undoStack + listOf(layers)
@@ -863,7 +980,7 @@ fun StencilEditor() {
         // ── Undo / Redo ───────────────────────────────────────────────────────
 
         Row(
-            modifier = Modifier.align(Alignment.TopEnd).padding(16.dp),
+            modifier = Modifier.align(Alignment.TopEnd).statusBarsPadding().padding(16.dp),
             horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             Button(
@@ -892,6 +1009,7 @@ fun StencilEditor() {
             Surface(
                 modifier = Modifier
                     .align(Alignment.TopEnd)
+                    .statusBarsPadding()
                     .padding(top = 72.dp)
                     .fillMaxHeight()
                     .padding(bottom = 160.dp)
@@ -981,6 +1099,8 @@ fun StencilEditor() {
                         )
                     }
 
+                    ToolButton("Fit", false) { fitPageToView() }
+
                     Box(
                         modifier = Modifier
                             .size(36.dp)
@@ -993,7 +1113,7 @@ fun StencilEditor() {
                     Box(Modifier.height(28.dp).width(1.dp).background(MaterialTheme.colorScheme.outlineVariant))
 
                     ToolButton("Image", false) { imageLauncher.launch("image/*") }
-                    ToolButton("Save", false) { requestSaveToGallery() }
+                    ToolButton("Save", false) { if (!isSaving) showSaveDialog = true }
 
                     Box(Modifier.height(28.dp).width(1.dp).background(MaterialTheme.colorScheme.outlineVariant))
 
@@ -1019,6 +1139,68 @@ fun StencilEditor() {
                 )
             }
         }
+    }
+
+    // ── Save / gallery / leave dialogs ────────────────────────────────────────
+
+    if (showSaveDialog) {
+        SaveDesignDialog(
+            initialName      = designName,
+            initialProjectId = projectId,
+            library          = libraryState.library,
+            onCreateProject  = { libraryState.createProject(it, null) },
+            onSave           = { name, targetProjectId ->
+                showSaveDialog = false
+                saveDesign(name, targetProjectId)
+            },
+            onDismiss        = {
+                showSaveDialog = false
+                exitAfterSave  = false
+            }
+        )
+    }
+
+    if (showGalleryPrompt) {
+        val finish = {
+            showGalleryPrompt = false
+            if (exitAfterSave) onExit()
+        }
+        AlertDialog(
+            onDismissRequest = finish,
+            title = { Text("Saved \"$designName\"") },
+            text  = { Text("Your design is saved in the app. Do you also want to save a copy to your gallery?") },
+            confirmButton = {
+                Button(onClick = {
+                    exportCurrentToGallery()
+                    finish()
+                }) { Text("Save to Gallery") }
+            },
+            dismissButton = { TextButton(onClick = finish) { Text("Not now") } }
+        )
+    }
+
+    if (showExitPrompt) {
+        AlertDialog(
+            onDismissRequest = { showExitPrompt = false },
+            title = { Text("Unsaved changes") },
+            text  = { Text("Save your changes to \"$designName\" before leaving?") },
+            confirmButton = {
+                Button(onClick = {
+                    showExitPrompt = false
+                    exitAfterSave  = true
+                    showSaveDialog = true
+                }) { Text("Save") }
+            },
+            dismissButton = {
+                Row {
+                    TextButton(onClick = { showExitPrompt = false }) { Text("Cancel") }
+                    TextButton(onClick = {
+                        showExitPrompt = false
+                        onExit()
+                    }) { Text("Discard", color = MaterialTheme.colorScheme.error) }
+                }
+            }
+        )
     }
 
     // ── Color picker dialog ───────────────────────────────────────────────────
