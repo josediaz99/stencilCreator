@@ -1,14 +1,22 @@
 package com.example.stencilcreator
 
+import android.Manifest
+import android.content.ContentValues
+import android.content.pm.PackageManager
 import android.graphics.BitmapFactory
 import android.graphics.Bitmap as AndroidBitmap
 import android.graphics.Color as AndroidColor
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
+import android.os.Environment
+import android.provider.MediaStore
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.content.ContextCompat
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -207,6 +215,84 @@ fun renderImage(canvas: Canvas, el: DrawElement.Image) {
     canvas.restore()
 }
 
+// ── Export ────────────────────────────────────────────────────────────────────
+
+// Renders the layers exactly as the on-screen canvas does (background + world
+// transform per layer) but skips live in-progress strokes/shapes and selection
+// overlays, since those are editing UI, not part of the drawing itself.
+fun renderLayersToBitmap(
+    layers: List<Layer>,
+    size: Size,
+    viewOffset: Offset,
+    viewRotation: Float,
+    viewScale: Float
+): AndroidBitmap {
+    val width  = size.width.toInt().coerceAtLeast(1)
+    val height = size.height.toInt().coerceAtLeast(1)
+    val bitmap = AndroidBitmap.createBitmap(width, height, AndroidBitmap.Config.ARGB_8888)
+    val canvas = Canvas(bitmap.asImageBitmap())
+    val bounds = Rect(Offset.Zero, Size(width.toFloat(), height.toFloat()))
+
+    val bgLayer = layers.first { it.isBackground }
+    val bgColor = bgLayer.backgroundColor
+    if (bgColor != null) {
+        canvas.drawRect(bounds, Paint().apply { color = bgColor })
+    }
+
+    for (layer in layers) {
+        val layerPaint = Paint().apply { alpha = layer.opacity }
+        canvas.saveLayer(bounds, layerPaint)
+        canvas.translate(viewOffset.x, viewOffset.y)
+        canvas.rotate(viewRotation)
+        canvas.scale(viewScale, viewScale)
+
+        for (el in layer.elements) {
+            when (el) {
+                is DrawElement.FreeStroke -> {
+                    if (el.points.size >= 2) {
+                        val paint = makePaint(el.strokeWidth, el.isEraser, false, el.color)
+                        val path = Path().apply {
+                            moveTo(el.points[0].x, el.points[0].y)
+                            el.points.drop(1).forEach { lineTo(it.x, it.y) }
+                        }
+                        canvas.drawPath(path, paint)
+                    }
+                }
+                is DrawElement.Shape -> {
+                    val paint = makePaint(el.strokeWidth, el.isEraser, el.isEraser, el.color)
+                    renderShape(canvas, el.shape, el.start, el.end, paint, el.rotation)
+                }
+                is DrawElement.Image -> renderImage(canvas, el)
+            }
+        }
+        canvas.restore()
+    }
+    return bitmap
+}
+
+fun saveBitmapToGallery(context: android.content.Context, bitmap: AndroidBitmap): Uri? {
+    val filename = "Stencil_${System.currentTimeMillis()}.png"
+    val resolver = context.contentResolver
+    val values = ContentValues().apply {
+        put(MediaStore.Images.Media.DISPLAY_NAME, filename)
+        put(MediaStore.Images.Media.MIME_TYPE, "image/png")
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            put(MediaStore.Images.Media.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + "/StencilCreator")
+            put(MediaStore.Images.Media.IS_PENDING, 1)
+        }
+    }
+    val uri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values) ?: return null
+    resolver.openOutputStream(uri)?.use { out ->
+        bitmap.compress(AndroidBitmap.CompressFormat.PNG, 100, out)
+    }
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+        values.clear()
+        values.put(MediaStore.Images.Media.IS_PENDING, 0)
+        resolver.update(uri, values, null, null)
+    }
+    return uri
+}
+
 // ── Selection helpers ─────────────────────────────────────────────────────────
 
 fun DrawElement.translated(delta: Offset): DrawElement = when (this) {
@@ -387,6 +473,34 @@ fun StencilEditor() {
             val bmp    = BitmapFactory.decodeStream(stream)
             stream?.close()
             if (bmp != null) pendingBitmap = bmp
+        }
+    }
+
+    // Save-to-gallery
+    fun exportToGallery() {
+        val bitmap = renderLayersToBitmap(layers, canvasSize, viewOffset, viewRotation, viewScale)
+        val uri = saveBitmapToGallery(context, bitmap)
+        Toast.makeText(
+            context,
+            if (uri != null) "Saved to gallery" else "Failed to save image",
+            Toast.LENGTH_SHORT
+        ).show()
+    }
+
+    val storagePermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        if (granted) exportToGallery()
+        else Toast.makeText(context, "Storage permission needed to save", Toast.LENGTH_SHORT).show()
+    }
+
+    fun requestSaveToGallery() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q ||
+            ContextCompat.checkSelfPermission(context, Manifest.permission.WRITE_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED
+        ) {
+            exportToGallery()
+        } else {
+            storagePermissionLauncher.launch(Manifest.permission.WRITE_EXTERNAL_STORAGE)
         }
     }
 
@@ -879,6 +993,7 @@ fun StencilEditor() {
                     Box(Modifier.height(28.dp).width(1.dp).background(MaterialTheme.colorScheme.outlineVariant))
 
                     ToolButton("Image", false) { imageLauncher.launch("image/*") }
+                    ToolButton("Save", false) { requestSaveToGallery() }
 
                     Box(Modifier.height(28.dp).width(1.dp).background(MaterialTheme.colorScheme.outlineVariant))
 
