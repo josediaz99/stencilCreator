@@ -5,7 +5,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 
 /** Tools available from the editor toolbar. */
-enum class Tool { PEN, ERASER, SELECT, LASSO }
+enum class Tool { PEN, ERASER, SELECT, LASSO, FILL }
 
 /** Shapes the pen or eraser can draw instead of a freehand stroke. */
 enum class DrawShape { CIRCLE, SQUARE, STAR }
@@ -44,6 +44,20 @@ sealed class DrawElement {
 
     /** An imported picture, positioned with the same box/rotation model as [Shape]. */
     data class Image(
+        val bitmap: ImageBitmap,
+        val start: Offset,
+        val end: Offset,
+        override val strokeWidth: Float = 0f,
+        override val isEraser: Boolean = false,
+        override val color: Color = Color.Unspecified,
+        val rotation: Float = 0f
+    ) : DrawElement()
+
+    /**
+     * The result of a paint-bucket fill: a rasterised mask covering the enclosed region that
+     * was flood-filled, positioned with the same box/rotation model as [Shape].
+     */
+    data class Fill(
         val bitmap: ImageBitmap,
         val start: Offset,
         val end: Offset,

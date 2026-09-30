@@ -60,12 +60,14 @@ suspend fun PointerInputScope.detectEditorGestures(state: EditorState) {
                         current == null -> {
                             val started = state.captureStroke()
                             stroke = started
-                            if (started.isMovingSelection) {
-                                state.pushHistory()
-                                historyPushed = true
-                                lastMoveWorld = worldPos
-                            } else {
-                                state.startPreview(started, worldPos)
+                            when {
+                                started.isMovingSelection -> {
+                                    state.pushHistory()
+                                    historyPushed = true
+                                    lastMoveWorld = worldPos
+                                }
+                                started.tool == Tool.FILL -> state.performFill(worldPos)
+                                else -> state.startPreview(started, worldPos)
                             }
                         }
                         current.isMovingSelection -> {
@@ -73,6 +75,7 @@ suspend fun PointerInputScope.detectEditorGestures(state: EditorState) {
                             state.transformSelection { it.translated(delta) }
                             lastMoveWorld = worldPos
                         }
+                        current.tool == Tool.FILL -> Unit
                         else -> state.extendPreview(current, worldPos)
                     }
                     pressed[0].consume()
@@ -166,6 +169,9 @@ private fun EditorState.finishStroke(stroke: StrokeGesture) {
     when {
         // Selection was moved live; history was pushed when the drag began
         stroke.isMovingSelection -> Unit
+
+        // Fill already applied on touch-down
+        stroke.tool == Tool.FILL -> Unit
 
         stroke.tool == Tool.SELECT -> {
             val start = liveSelectionStart

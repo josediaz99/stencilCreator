@@ -7,6 +7,7 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.Canvas
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.Paint
 import androidx.compose.ui.graphics.PaintingStyle
 import androidx.compose.ui.graphics.Path
@@ -74,17 +75,22 @@ fun renderShape(
     }
 }
 
-fun renderImage(canvas: Canvas, image: DrawElement.Image) {
-    val box = OrientedBox.fromDiagonal(image.start, image.end, image.rotation)
+private fun renderBitmapBox(canvas: Canvas, bitmap: ImageBitmap, start: Offset, end: Offset, rotation: Float) {
+    val box = OrientedBox.fromDiagonal(start, end, rotation)
     if (box.halfWidth < MIN_IMAGE_HALF_EXTENT || box.halfHeight < MIN_IMAGE_HALF_EXTENT) return
 
-    val bitmap = image.bitmap
     canvas.withBoxTransform(box) {
         // Scale from the bitmap's native pixel size to the box's world-space size
         scale(box.halfWidth * 2f / bitmap.width, box.halfHeight * 2f / bitmap.height)
         drawImage(bitmap, Offset(-bitmap.width / 2f, -bitmap.height / 2f), Paint())
     }
 }
+
+fun renderImage(canvas: Canvas, image: DrawElement.Image) =
+    renderBitmapBox(canvas, image.bitmap, image.start, image.end, image.rotation)
+
+fun renderFill(canvas: Canvas, fill: DrawElement.Fill) =
+    renderBitmapBox(canvas, fill.bitmap, fill.start, fill.end, fill.rotation)
 
 fun drawElement(canvas: Canvas, element: DrawElement) {
     when (element) {
@@ -100,6 +106,7 @@ fun drawElement(canvas: Canvas, element: DrawElement) {
             renderShape(canvas, element.shape, element.start, element.end, paint, element.rotation)
         }
         is DrawElement.Image -> renderImage(canvas, element)
+        is DrawElement.Fill  -> renderFill(canvas, element)
     }
 }
 

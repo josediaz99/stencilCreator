@@ -17,6 +17,16 @@ val BRUSH_SIZE_RANGE = 4f..80f
 private const val DEFAULT_PEN_SIZE = 8f
 private const val DEFAULT_ERASER_SIZE = 32f
 
+/**
+ * How far a pixel's colour may drift from the fill target and still be treated as part of
+ * the same region, as a percentage of the full colour range. Low values only bridge crisp,
+ * fully-opaque lines; higher values are needed to close the anti-aliased halo around thin or
+ * soft-edged lines without a visible gap, at the cost of being more likely to leak through a
+ * faint or low-contrast line entirely.
+ */
+val FILL_SENSITIVITY_RANGE = 0f..100f
+private const val DEFAULT_FILL_SENSITIVITY = 15f
+
 /** Newly placed images span this fraction of the canvas's shorter side, each side of centre. */
 private const val IMAGE_PLACEMENT_FRACTION = 0.35f
 
@@ -179,6 +189,18 @@ class EditorState(document: EditorDocument) {
         }
     }
 
+    /**
+     * Paint-bucket fill at [point]: flood-fills the enclosed region under it with [penColor],
+     * or does nothing if the region there isn't bounded (see [floodFillAt]). [fillSensitivity]
+     * controls how much colour drift (e.g. anti-aliasing around a thin or soft line) still
+     * counts as part of the region, so the fill can be tuned to sit flush against the line
+     * with no gap, whether it's a crisp, wide stroke or a thin, softer one.
+     */
+    fun performFill(point: Offset) {
+        val fill = floodFillAt(this, point, penColor, fillSensitivity) ?: return
+        addElement(fill)
+    }
+
     fun deleteSelection() {
         val selection = selectedIndices
         pushHistory()
@@ -219,6 +241,7 @@ class EditorState(document: EditorDocument) {
     var penColor by mutableStateOf(Color.Black)
     private var penSize by mutableFloatStateOf(DEFAULT_PEN_SIZE)
     private var eraserSize by mutableFloatStateOf(DEFAULT_ERASER_SIZE)
+    var fillSensitivity by mutableFloatStateOf(DEFAULT_FILL_SENSITIVITY)
 
     /** Stroke width for the current tool; the pen and eraser each remember their own size. */
     var brushSize: Float

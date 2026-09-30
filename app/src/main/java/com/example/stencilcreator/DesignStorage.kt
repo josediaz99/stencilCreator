@@ -232,6 +232,13 @@ private fun elementToJson(el: DrawElement, imageName: (ImageBitmap) -> String): 
         .putOffset("start", el.start)
         .putOffset("end", el.end)
         .put("rotation", el.rotation.r())
+    is DrawElement.Fill -> JSONObject()
+        .put("type", "fill")
+        .put("file", imageName(el.bitmap))
+        .putOffset("start", el.start)
+        .putOffset("end", el.end)
+        .put("rotation", el.rotation.r())
+        .put("color", el.color.toArgb())
 }
 
 private fun elementFromJson(json: JSONObject, loadImage: (String) -> ImageBitmap?): DrawElement? =
@@ -262,6 +269,15 @@ private fun elementFromJson(json: JSONObject, loadImage: (String) -> ImageBitmap
                 start    = json.getOffset("start"),
                 end      = json.getOffset("end"),
                 rotation = json.float("rotation")
+            )
+        }
+        "fill" -> loadImage(json.getString("file"))?.let { bitmap ->
+            DrawElement.Fill(
+                bitmap   = bitmap,
+                start    = json.getOffset("start"),
+                end      = json.getOffset("end"),
+                rotation = json.float("rotation"),
+                color    = Color(json.getInt("color"))
             )
         }
         else -> null

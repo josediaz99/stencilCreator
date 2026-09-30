@@ -106,6 +106,7 @@ fun EditorToolbar(
             ) {
                 ToolButton("Pen",    state.selectedTool == Tool.PEN)    { state.selectedTool = Tool.PEN }
                 ToolButton("Eraser", state.selectedTool == Tool.ERASER) { state.selectedTool = Tool.ERASER }
+                ToolButton("Fill",   state.selectedTool == Tool.FILL)   { state.selectedTool = Tool.FILL }
                 ToolButton("Select", state.selectedTool == Tool.SELECT) { state.selectedTool = Tool.SELECT }
                 ToolButton("Lasso",  state.selectedTool == Tool.LASSO)  { state.selectedTool = Tool.LASSO }
                 ToolbarDivider()
@@ -139,13 +140,23 @@ fun EditorToolbar(
                 )
             }
 
-            Text("Size: ${state.brushSize.toInt()}", fontSize = 13.sp)
-            Slider(
-                value         = state.brushSize,
-                onValueChange = { state.brushSize = it },
-                valueRange    = BRUSH_SIZE_RANGE,
-                modifier      = Modifier.fillMaxWidth()
-            )
+            if (state.selectedTool == Tool.FILL) {
+                Text("Fill sensitivity: ${state.fillSensitivity.toInt()}", fontSize = 13.sp)
+                Slider(
+                    value         = state.fillSensitivity,
+                    onValueChange = { state.fillSensitivity = it },
+                    valueRange    = FILL_SENSITIVITY_RANGE,
+                    modifier      = Modifier.fillMaxWidth()
+                )
+            } else {
+                Text("Size: ${state.brushSize.toInt()}", fontSize = 13.sp)
+                Slider(
+                    value         = state.brushSize,
+                    onValueChange = { state.brushSize = it },
+                    valueRange    = BRUSH_SIZE_RANGE,
+                    modifier      = Modifier.fillMaxWidth()
+                )
+            }
         }
     }
 }
